@@ -4,7 +4,7 @@ Analyze a directory of speech clips and select a balanced subset for transcripti
 
 Designed for building diverse speech corpora from found audio (radio, podcasts, field recordings). Takes pre-segmented clips, produces per-sample metadata (gender, language, speaker ID, audio quality), then selects a subset that maximizes speaker and gender diversity.
 
-> **Primary corpus:** This tool is developed for processing the [VOA Rohingya dataset](https://huggingface.co/datasets/freococo/rohingya_asr_audio) as part of the Kobo/UNHCR/GMU Rohingya ASR project. Default parameters are tuned for this corpus — Whisper doesn't recognize Rohingya and misidentifies it as Bengali, Farsi, Nepali, etc., so the selection step excludes languages known *not* to be Rohingya (English by default) rather than trying to detect Rohingya directly. Use `--exclude-langs` to add other languages to exclude (e.g. `--exclude-langs en,bn` if Bengali content should also be filtered out).
+> **Primary corpus:** This tool is developed for processing the [VOA Rohingya dataset](https://huggingface.co/datasets/freococo/rohingya_asr_audio) as part of a Rohingya ASR project. Default parameters are tuned for this corpus — Whisper doesn't recognize Rohingya and misidentifies it as Bengali, Farsi, Nepali, etc., so the selection step excludes languages known *not* to be Rohingya (English by default) rather than trying to detect Rohingya directly. Use `--exclude-langs` to add other languages to exclude (e.g. `--exclude-langs en,bn` if Bengali content should also be filtered out).
 
 ## How it works
 
