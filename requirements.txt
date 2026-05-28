@@ -1,0 +1,9 @@
+torch
+torchaudio
+pandas
+pydub
+inaSpeechSegmenter
+openai-whisper
+speechbrain
+scikit-learn
+tf-keras<2.20
