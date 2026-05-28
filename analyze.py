@@ -64,10 +64,17 @@ def parse_args():
                    help="Whisper model size: tiny/base/small/medium (default: base)")
     p.add_argument("--en-threshold", type=float, default=0.3,
                    help="Whisper English probability threshold (default: 0.3)")
+    p.add_argument("--cluster-method", default="hdbscan",
+                   choices=["hdbscan", "agglomerative"],
+                   help="Speaker clustering algorithm (default: hdbscan). "
+                        "hdbscan auto-detects cluster count and scales to large datasets. "
+                        "agglomerative tries all k up to --max-clusters but needs O(n^2) memory.")
     p.add_argument("--n-clusters", type=int, default=None,
-                   help="Force number of speaker clusters (auto if not set)")
+                   help="Force number of speaker clusters (agglomerative only, auto if not set)")
     p.add_argument("--max-clusters", type=int, default=30,
-                   help="Maximum clusters to try in auto mode (default: 30)")
+                   help="Max clusters to try in auto mode (agglomerative only, default: 30)")
+    p.add_argument("--min-cluster-size", type=int, default=3,
+                   help="Minimum cluster size (hdbscan only, default: 3)")
     return p.parse_args()
 
 
@@ -248,10 +255,62 @@ def run_whisper_pass(wav_files, input_dir, checkpoint_path, model_size="base", e
 
 # ─── Pass 3: Speaker embeddings + clustering ─────────────────────────
 
-def run_embedding_pass(wav_files, input_dir, output_dir, n_clusters=None, max_clusters=30):
-    from speechbrain.inference.speaker import EncoderClassifier
+def _cluster_hdbscan(X, min_cluster_size=3):
+    """Cluster with HDBSCAN — auto-detects cluster count, scales to large datasets."""
+    from sklearn.cluster import HDBSCAN
+    from sklearn.metrics import silhouette_score
+
+    hdb = HDBSCAN(min_cluster_size=min_cluster_size, min_samples=2)
+    labels = hdb.fit_predict(X)
+    n_clusters = len(set(labels) - {-1})
+    n_noise = (labels == -1).sum()
+
+    # Silhouette on assigned points only
+    mask = labels != -1
+    if n_clusters > 1 and mask.sum() > n_clusters:
+        sil = silhouette_score(X[mask], labels[mask])
+    else:
+        sil = 0.0
+
+    # Assign noise points to nearest cluster centroid
+    if n_noise > 0 and n_clusters > 0:
+        centroids = np.array([X[labels == c].mean(axis=0) for c in range(n_clusters)])
+        for i in np.where(labels == -1)[0]:
+            dists = np.linalg.norm(centroids - X[i], axis=1)
+            labels[i] = int(np.argmin(dists))
+
+    print(f"  → {n_clusters} clusters, {n_noise} reassigned from noise (silhouette={sil:.3f})")
+    return labels
+
+
+def _cluster_agglomerative(X, n_clusters=None, max_clusters=30):
+    """Cluster with agglomerative — tries all k, picks best silhouette. O(n^2) memory."""
     from sklearn.cluster import AgglomerativeClustering
     from sklearn.metrics import silhouette_score
+
+    max_k = min(max_clusters, len(X) // 2)
+    if n_clusters:
+        labels = AgglomerativeClustering(n_clusters=n_clusters).fit_predict(X)
+        k = n_clusters
+        sil = silhouette_score(X, labels) if n_clusters > 1 else 0
+    else:
+        best_k, best_score, best_labels = 2, -1, None
+        for k in range(2, max_k + 1):
+            labels = AgglomerativeClustering(n_clusters=k).fit_predict(X)
+            score = silhouette_score(X, labels)
+            if score > best_score:
+                best_k, best_score, best_labels = k, score, labels
+        labels = best_labels
+        k = best_k
+        sil = best_score
+    print(f"  → {k} clusters (silhouette={sil:.3f})")
+    return labels
+
+
+def run_embedding_pass(wav_files, input_dir, output_dir,
+                       cluster_method="hdbscan", n_clusters=None,
+                       max_clusters=30, min_cluster_size=3):
+    from speechbrain.inference.speaker import EncoderClassifier
 
     emb_path = os.path.join(output_dir, "embeddings.npy")
     names_path = os.path.join(output_dir, "embedding_files.txt")
@@ -294,23 +353,11 @@ def run_embedding_pass(wav_files, input_dir, output_dir, n_clusters=None, max_cl
             f.write("\n".join(filenames))
 
     # Cluster
-    print(f"  Clustering ({X.shape[0]} embeddings, dim={X.shape[1]})...")
-    max_k = min(max_clusters, len(X) // 2)
-    if n_clusters:
-        labels = AgglomerativeClustering(n_clusters=n_clusters).fit_predict(X)
-        k = n_clusters
-        sil = silhouette_score(X, labels) if n_clusters > 1 else 0
+    print(f"  Clustering ({X.shape[0]} embeddings, dim={X.shape[1]}, method={cluster_method})...")
+    if cluster_method == "hdbscan":
+        labels = _cluster_hdbscan(X, min_cluster_size=min_cluster_size)
     else:
-        best_k, best_score, best_labels = 2, -1, None
-        for k in range(2, max_k + 1):
-            labels = AgglomerativeClustering(n_clusters=k).fit_predict(X)
-            score = silhouette_score(X, labels)
-            if score > best_score:
-                best_k, best_score, best_labels = k, score, labels
-        labels = best_labels
-        k = best_k
-        sil = best_score
-    print(f"  → {k} clusters (silhouette={sil:.3f})")
+        labels = _cluster_agglomerative(X, n_clusters=n_clusters, max_clusters=max_clusters)
 
     results = pd.DataFrame({
         "file": filenames,
@@ -349,8 +396,12 @@ def main():
 
     # Pass 3
     if not args.skip_embeddings:
-        df_spk, embeddings = run_embedding_pass(wav_files, args.input_dir, output_dir,
-                                                 args.n_clusters, args.max_clusters)
+        df_spk, embeddings = run_embedding_pass(
+            wav_files, args.input_dir, output_dir,
+            cluster_method=args.cluster_method,
+            n_clusters=args.n_clusters,
+            max_clusters=args.max_clusters,
+            min_cluster_size=args.min_cluster_size)
         df = df.merge(df_spk, on="file")
 
     # Save final output

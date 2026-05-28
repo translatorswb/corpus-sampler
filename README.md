@@ -66,8 +66,10 @@ Produces `selected.csv` — a filtered, balanced subset of the input.
 --skip-embeddings       Skip speaker clustering (faster)
 --whisper-model SIZE    Whisper model: tiny/base/small/medium (default: base)
 --en-threshold FLOAT    English probability threshold (default: 0.3)
---n-clusters INT        Force number of speaker clusters (auto if not set)
---max-clusters INT      Max clusters to try in auto mode (default: 30)
+--cluster-method M      hdbscan (default) or agglomerative
+--min-cluster-size INT  Min cluster size for hdbscan (default: 3)
+--n-clusters INT        Force cluster count (agglomerative only)
+--max-clusters INT      Max clusters to try (agglomerative only, default: 30)
 ```
 
 ### Select options
@@ -105,7 +107,8 @@ Produces `selected.csv` — a filtered, balanced subset of the input.
 
 ## Known limitations
 
-- **Speaker clustering does not scale past ~10K clips.** The agglomerative clustering uses an O(n^2) distance matrix that will exhaust memory on large datasets. For the full VOA Rohingya corpus (~128K clips), run with `--skip-embeddings` and handle speaker clustering separately, or process in batches. This is planned for a future fix (e.g. mini-batch KMeans or HDBSCAN).
+- **Agglomerative clustering does not scale past ~10K clips** — it uses an O(n^2) distance matrix that will exhaust memory on large datasets. Use `--cluster-method hdbscan` (the default) for large corpora. HDBSCAN auto-detects the number of speakers and scales well.
+- **Speaker embedding extraction is slow on CPU** (~1.8s/clip). For the full VOA Rohingya corpus (~128K clips), budget ~64h on CPU or ~11h on GPU.
 
 ## Works with segment-found-audio
 
