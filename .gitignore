@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 *.npy
+.claude/
+CLAUDE.md
 rohingya_samples/
 rohingya_samples_output/
-.claude/
+rohingya_samples_notes.txt
