@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 *.npy
+rohingya_samples/
+rohingya_samples_output/
+.claude/

@@ -177,7 +177,7 @@ def main():
 
     selected.to_csv(output_path, index=False)
 
-    # Report
+    # Console summary
     n_sel = len(selected)
     dur = selected["duration_sec"].sum()
     print(f"\n{'='*50}")
@@ -198,8 +198,180 @@ def main():
         if len(sc) <= 20:
             print(f"    distribution: {dict(sc)}")
 
+    # Write markdown report
+    report_path = output_path.replace(".csv", "_report.md")
+    _write_report(df, selected, args, report_path)
+
     print(f"\n  → {output_path}")
+    print(f"  → {report_path}")
     print(f"{'='*50}")
+
+
+def _dataset_stats(df, label):
+    """Generate a stats block for a dataset."""
+    n = len(df)
+    dur = df["duration_sec"].sum()
+    lines = []
+    lines.append(f"### {label}")
+    lines.append("")
+    lines.append(f"| Metric | Value |")
+    lines.append(f"|--------|-------|")
+    lines.append(f"| Samples | {n} |")
+    lines.append(f"| Total duration | {dur/60:.1f} min ({dur/3600:.2f} h) |")
+    lines.append(f"| Mean duration | {df['duration_sec'].mean():.1f}s |")
+    lines.append(f"| Duration range | {df['duration_sec'].min():.1f}s – {df['duration_sec'].max():.1f}s |")
+
+    if "snr_db" in df.columns:
+        lines.append(f"| SNR range | {df['snr_db'].min():.0f} – {df['snr_db'].max():.0f} dB |")
+        lines.append(f"| Mean SNR | {df['snr_db'].mean():.0f} dB |")
+
+    lines.append("")
+
+    # Gender
+    if "gender" in df.columns:
+        lines.append("**Gender distribution:**")
+        lines.append("")
+        lines.append("| Gender | Count | % |")
+        lines.append("|--------|-------|---|")
+        for g, c in df["gender"].value_counts().items():
+            lines.append(f"| {g} | {c} | {c/n*100:.0f}% |")
+        lines.append("")
+
+    # Speech/music/english
+    if "is_speech" in df.columns:
+        lines.append("**Content classification:**")
+        lines.append("")
+        lines.append("| Category | Count | % |")
+        lines.append("|----------|-------|---|")
+        speech_n = int(df["is_speech"].sum())
+        lines.append(f"| Usable speech | {speech_n} | {speech_n/n*100:.0f}% |")
+        if "is_music" in df.columns:
+            music_n = int(df["is_music"].sum())
+            lines.append(f"| Music/jingles | {music_n} | {music_n/n*100:.0f}% |")
+        nonspeech = n - speech_n
+        lines.append(f"| Non-speech total | {nonspeech} | {nonspeech/n*100:.0f}% |")
+        if "is_english" in df.columns:
+            en_n = int(df["is_english"].sum())
+            lines.append(f"| English | {en_n} | {en_n/n*100:.0f}% |")
+        lines.append("")
+
+    # Speakers
+    if "speaker_id" in df.columns:
+        sc = df["speaker_id"].value_counts()
+        lines.append("**Speaker distribution:**")
+        lines.append("")
+        lines.append(f"| Metric | Value |")
+        lines.append(f"|--------|-------|")
+        lines.append(f"| Distinct speakers | {len(sc)} |")
+        lines.append(f"| Largest cluster | {sc.index[0]} ({sc.iloc[0]} clips, {sc.iloc[0]/n*100:.0f}%) |")
+        lines.append(f"| Smallest cluster | {sc.index[-1]} ({sc.iloc[-1]} clips) |")
+        lines.append(f"| Median cluster size | {sc.median():.0f} clips |")
+        lines.append("")
+
+        # Top speakers table
+        top_n = min(10, len(sc))
+        lines.append(f"Top {top_n} speakers:")
+        lines.append("")
+        lines.append("| Speaker | Clips | % | Gender |")
+        lines.append("|---------|-------|---|--------|")
+        for spk in sc.index[:top_n]:
+            spk_df = df[df["speaker_id"] == spk]
+            count = len(spk_df)
+            if "gender" in df.columns:
+                genders = spk_df["gender"].value_counts()
+                gender_str = ", ".join(f"{g}={c}" for g, c in genders.items())
+            else:
+                gender_str = "—"
+            lines.append(f"| {spk} | {count} | {count/n*100:.0f}% | {gender_str} |")
+        lines.append("")
+
+    # Language breakdown (if whisper data present)
+    if "whisper_lang" in df.columns:
+        lines.append("**Detected languages (Whisper):**")
+        lines.append("")
+        lines.append("| Language | Count | % |")
+        lines.append("|----------|-------|---|")
+        for lang, c in df["whisper_lang"].value_counts().head(10).items():
+            lines.append(f"| {lang} | {c} | {c/n*100:.0f}% |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _write_report(df_full, df_selected, args, report_path):
+    """Write a markdown report comparing input dataset and selected subset."""
+    lines = []
+    lines.append("# Corpus Analysis and Selection Report")
+    lines.append("")
+    lines.append(f"Generated from `{args.metadata}`")
+    lines.append("")
+
+    # Selection parameters
+    lines.append("## Selection parameters")
+    lines.append("")
+    lines.append("| Parameter | Value |")
+    lines.append("|-----------|-------|")
+    lines.append(f"| Target samples | {args.target or 'all passing filters'} |")
+    if args.max_per_speaker:
+        lines.append(f"| Max per speaker | {args.max_per_speaker} |")
+    elif args.max_per_speaker_pct:
+        lines.append(f"| Max per speaker | {args.max_per_speaker_pct*100:.0f}% of target |")
+    if args.min_female > 0:
+        lines.append(f"| Min female ratio | {args.min_female} |")
+    lines.append(f"| Exclude music | {not args.include_music} |")
+    lines.append(f"| Exclude English | {not args.include_english} |")
+    lines.append(f"| Exclude non-speech | {not args.include_nonspeech} |")
+    if args.min_snr > 0:
+        lines.append(f"| Min SNR | {args.min_snr} dB |")
+    if args.min_duration > 0:
+        lines.append(f"| Min duration | {args.min_duration}s |")
+    if args.max_duration < 999:
+        lines.append(f"| Max duration | {args.max_duration}s |")
+    lines.append(f"| Random seed | {args.seed} |")
+    lines.append("")
+
+    # Input dataset stats
+    lines.append("## Input dataset")
+    lines.append("")
+    lines.append(_dataset_stats(df_full, "Full corpus"))
+
+    # Selected subset stats
+    lines.append("## Selected subset")
+    lines.append("")
+    lines.append(_dataset_stats(df_selected, "Selected"))
+
+    # Comparison
+    n_full = len(df_full)
+    n_sel = len(df_selected)
+    lines.append("## Comparison")
+    lines.append("")
+    lines.append("| Metric | Input | Selected | Change |")
+    lines.append("|--------|-------|----------|--------|")
+    lines.append(f"| Samples | {n_full} | {n_sel} | {n_sel/n_full*100:.0f}% kept |")
+
+    dur_full = df_full["duration_sec"].sum()
+    dur_sel = df_selected["duration_sec"].sum()
+    lines.append(f"| Duration | {dur_full/60:.1f} min | {dur_sel/60:.1f} min | {dur_sel/dur_full*100:.0f}% |")
+
+    if "gender" in df_full.columns:
+        fem_full = (df_full["gender"] == "female").sum()
+        fem_sel = (df_selected["gender"] == "female").sum()
+        pct_full = fem_full / n_full * 100
+        pct_sel = fem_sel / n_sel * 100 if n_sel > 0 else 0
+        lines.append(f"| Female % | {pct_full:.0f}% | {pct_sel:.0f}% | {'+'  if pct_sel > pct_full else ''}{pct_sel - pct_full:.0f}pp |")
+
+    if "speaker_id" in df_full.columns:
+        spk_full = df_full["speaker_id"].nunique()
+        spk_sel = df_selected["speaker_id"].nunique()
+        largest_full = df_full["speaker_id"].value_counts().iloc[0]
+        largest_sel = df_selected["speaker_id"].value_counts().iloc[0]
+        lines.append(f"| Speakers | {spk_full} | {spk_sel} | |")
+        lines.append(f"| Largest speaker % | {largest_full/n_full*100:.0f}% | {largest_sel/n_sel*100:.0f}% | {'improved' if largest_sel/n_sel < largest_full/n_full else 'same'} |")
+
+    lines.append("")
+
+    with open(report_path, "w") as f:
+        f.write("\n".join(lines))
 
 
 def _diverse_sample(pool, n, max_per_speaker, seed, existing_counts=None):
