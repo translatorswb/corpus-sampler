@@ -12,7 +12,8 @@ Designed for building diverse speech corpora from found audio (radio, podcasts, 
 
 1. **[inaSpeechSegmenter](https://github.com/ina-foss/inaSpeechSegmenter)** — classifies speech/music/noise, tags speaker gender
 2. **[Whisper](https://github.com/openai/whisper)** — detects language (English vs non-English)
-3. **[SpeechBrain ECAPA-TDNN](https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb)** — extracts speaker embeddings, clusters into speaker groups
+3. **[SpeechBrain ECAPA-TDNN](https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb)** — extracts speaker embeddings
+4. **[HDBSCAN](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.HDBSCAN.html)** — clusters embeddings into speaker groups (auto-detects number of speakers)
 
 Also computes SNR (signal-to-noise ratio) for each clip.
 
