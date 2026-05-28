@@ -1,4 +1,4 @@
-# select-corpus
+# corpus-sampler
 
 Analyze a directory of speech clips and select a balanced subset for transcription.
 
