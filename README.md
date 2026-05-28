@@ -4,6 +4,8 @@ Analyze a directory of speech clips and select a balanced subset for transcripti
 
 Designed for building diverse speech corpora from found audio (radio, podcasts, field recordings). Takes pre-segmented clips, produces per-sample metadata (gender, language, speaker ID, audio quality), then selects a subset that maximizes speaker and gender diversity.
 
+> **Primary corpus:** This tool is developed for processing the [VOA Rohingya dataset](https://huggingface.co/datasets/freococo/rohingya_asr_audio) as part of the Kobo/UNHCR/GMU Rohingya ASR project. Default parameters are tuned for this corpus — Whisper doesn't recognize Rohingya and misidentifies it as Bengali, Farsi, Nepali, etc., so the selection step excludes languages known *not* to be Rohingya (English by default) rather than trying to detect Rohingya directly. Use `--exclude-langs` to add other languages to exclude (e.g. `--exclude-langs en,bn` if Bengali content should also be filtered out).
+
 ## How it works
 
 **`analyze.py`** — Runs three analysis passes on each clip:
@@ -16,7 +18,7 @@ Also computes SNR (signal-to-noise ratio) for each clip.
 
 **`select_subset.py`** — Reads the metadata and selects a balanced subset:
 
-- Filters out music, non-speech, English, low-SNR clips
+- Filters out music, non-speech, excluded languages, low-SNR clips
 - Caps samples per speaker to reduce dominant-speaker bias
 - Prioritizes female samples to improve gender balance
 - All parameters configurable via CLI
@@ -36,13 +38,15 @@ pip install -r requirements.txt
 ### Step 1: Analyze
 
 ```bash
-python analyze.py /path/to/clips/
-python analyze.py /path/to/clips/ -o results/
+python analyze.py /path/to/clips/                  # outputs to /path/to/clips_output/
+python analyze.py /path/to/clips/ -o results/      # outputs to results/
 python analyze.py /path/to/clips/ --skip-whisper    # faster, no language detection
 python analyze.py /path/to/clips/ --skip-embeddings  # faster, no speaker clustering
 ```
 
-Produces `metadata.csv` in the output directory.
+Produces `metadata.csv` in the output directory. Searches subdirectories recursively.
+
+**Crash recovery:** If the process is interrupted, re-run the same command. It will pick up from where it left off — checkpoint files in the output directory track per-pass progress.
 
 ### Step 2: Select
 
@@ -57,6 +61,7 @@ Produces `selected.csv` — a filtered, balanced subset of the input.
 ### Analyze options
 
 ```
+-o, --output-dir DIR    Output directory (default: <input_dir>_output)
 --skip-whisper          Skip language detection (faster)
 --skip-embeddings       Skip speaker clustering (faster)
 --whisper-model SIZE    Whisper model: tiny/base/small/medium (default: base)
@@ -72,8 +77,8 @@ Produces `selected.csv` — a filtered, balanced subset of the input.
 --max-per-speaker INT     Max samples from any single speaker
 --max-per-speaker-pct F   Max per speaker as fraction of target (e.g. 0.1)
 --min-female FLOAT        Target minimum female ratio (0-1)
+--exclude-langs CODES     Comma-separated language codes to exclude (default: en)
 --include-music           Don't exclude music clips
---include-english         Don't exclude English clips
 --include-nonspeech       Don't exclude non-speech clips
 --min-snr FLOAT           Minimum SNR in dB
 --min-duration FLOAT      Minimum clip duration in seconds
@@ -85,7 +90,7 @@ Produces `selected.csv` — a filtered, balanced subset of the input.
 
 | Field | Source | Description |
 |---|---|---|
-| `file` | — | Filename |
+| `file` | — | Relative path from input directory |
 | `duration_sec` | ina | Clip duration |
 | `gender` | ina | `male` / `female` / `unknown` |
 | `speech_ratio` | ina | Fraction of clip that is speech |
@@ -98,9 +103,13 @@ Produces `selected.csv` — a filtered, balanced subset of the input.
 | `is_english` | whisper | English prob > threshold |
 | `speaker_id` | ecapa | Speaker cluster label |
 
+## Known limitations
+
+- **Speaker clustering does not scale past ~10K clips.** The agglomerative clustering uses an O(n^2) distance matrix that will exhaust memory on large datasets. For the full VOA Rohingya corpus (~128K clips), run with `--skip-embeddings` and handle speaker clustering separately, or process in batches. This is planned for a future fix (e.g. mini-batch KMeans or HDBSCAN).
+
 ## Works with segment-found-audio
 
-This tool is designed to work as a second step after [segment-found-audio](../segment-found-audio/), but also works on any directory of pre-segmented audio clips from other sources.
+This tool is designed to work as a second step after [speech-segmenter](https://github.com/translatorswb/speech-segmenter), but also works on any directory of pre-segmented audio clips from other sources.
 
 ```
 Raw audio → [segment-found-audio] → clips/ → [select-corpus] → metadata.csv + selected.csv

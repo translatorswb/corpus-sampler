@@ -12,6 +12,9 @@ Also computes SNR for each clip.
 Input:  directory of audio files (WAV, MP3, etc.)
 Output: metadata.csv with one row per clip
 
+Supports crash recovery: re-run the same command and it will skip
+already-processed files, resuming from where it left off.
+
 Usage:
   python analyze.py /path/to/clips/
   python analyze.py /path/to/clips/ -o results/
@@ -22,8 +25,8 @@ import os
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
 import argparse
-import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -38,6 +41,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 SAMPLING_RATE = 16000
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".mp4", ".mpeg", ".wma"}
+CHECKPOINT_INTERVAL = 50
 
 
 def parse_args():
@@ -51,7 +55,7 @@ def parse_args():
 """)
     p.add_argument("input_dir", help="Directory containing audio clips")
     p.add_argument("-o", "--output-dir", default=None,
-                   help="Output directory (default: input_dir)")
+                   help="Output directory (default: <input_dir>_output)")
     p.add_argument("--skip-whisper", action="store_true",
                    help="Skip Whisper language detection")
     p.add_argument("--skip-embeddings", action="store_true",
@@ -69,8 +73,8 @@ def parse_args():
 
 def find_audio_files(input_dir):
     files = []
-    for f in sorted(Path(input_dir).iterdir()):
-        if f.suffix.lower() in AUDIO_EXTENSIONS:
+    for f in sorted(Path(input_dir).rglob("*")):
+        if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS:
             files.append(str(f))
     return files
 
@@ -103,16 +107,53 @@ def compute_snr(waveform, sr=SAMPLING_RATE, frame_ms=30, top_pct=0.9, bottom_pct
     return float(10 * torch.log10(signal_energy / noise_energy))
 
 
+def _file_key(wav_path, input_dir):
+    """Relative path from input_dir, used as the file identifier in CSVs."""
+    return os.path.relpath(wav_path, input_dir)
+
+
+def _load_checkpoint(path):
+    """Load a checkpoint CSV and return the set of already-processed file keys."""
+    if os.path.exists(path):
+        df = pd.read_csv(path)
+        return set(df["file"].tolist()), df.to_dict("records")
+    return set(), []
+
+
+def _save_checkpoint(records, path):
+    pd.DataFrame(records).to_csv(path, index=False)
+
+
+def _eta_str(elapsed, done, total):
+    if done == 0:
+        return "estimating..."
+    rate = elapsed / done
+    remaining = rate * (total - done)
+    if remaining > 3600:
+        return f"{remaining/3600:.1f}h remaining"
+    return f"{remaining/60:.0f}m remaining"
+
+
 # ─── Pass 1: inaSpeechSegmenter ─────────────────────────────────────
 
-def run_ina_pass(wav_files):
+def run_ina_pass(wav_files, input_dir, checkpoint_path):
     from inaSpeechSegmenter import Segmenter
-    print(f"\n  Pass 1/3: inaSpeechSegmenter")
+
+    done_keys, results = _load_checkpoint(checkpoint_path)
+    remaining = [(f, _file_key(f, input_dir)) for f in wav_files
+                 if _file_key(f, input_dir) not in done_keys]
+
+    total = len(wav_files)
+    n_done = total - len(remaining)
+    print(f"\n  Pass 1/3: inaSpeechSegmenter ({n_done}/{total} already done)")
+    if not remaining:
+        return pd.DataFrame(results)
+
     print(f"  Loading model...")
     seg = Segmenter()
+    t0 = time.time()
 
-    results = []
-    for i, wav_path in enumerate(wav_files):
+    for i, (wav_path, fkey) in enumerate(remaining):
         segmentation = seg(wav_path)
         df = pd.DataFrame(segmentation, columns=["label", "start", "stop"])
         df["duration"] = df["stop"] - df["start"]
@@ -131,12 +172,11 @@ def run_ina_pass(wav_files):
         else:
             gender = "unknown"
 
-        # SNR
         waveform = load_audio(wav_path)
         snr = compute_snr(waveform)
 
         results.append({
-            "file": os.path.basename(wav_path),
+            "file": fkey,
             "duration_sec": round(total_dur, 2),
             "gender": gender,
             "speech_ratio": round(speech_total / total_dur, 2) if total_dur > 0 else 0,
@@ -147,22 +187,38 @@ def run_ina_pass(wav_files):
             "snr_db": round(snr, 1),
         })
 
-        if (i + 1) % 20 == 0 or i == len(wav_files) - 1:
-            print(f"    {i+1}/{len(wav_files)}")
+        count = n_done + i + 1
+        if (i + 1) % CHECKPOINT_INTERVAL == 0:
+            _save_checkpoint(results, checkpoint_path)
+        if (i + 1) % 20 == 0 or i == len(remaining) - 1:
+            eta = _eta_str(time.time() - t0, i + 1, len(remaining))
+            print(f"    {count}/{total}  ({eta})")
 
+    _save_checkpoint(results, checkpoint_path)
     return pd.DataFrame(results)
 
 
 # ─── Pass 2: Whisper language detection ──────────────────────────────
 
-def run_whisper_pass(wav_files, model_size="base", en_threshold=0.3):
+def run_whisper_pass(wav_files, input_dir, checkpoint_path, model_size="base", en_threshold=0.3):
     import whisper
+
+    done_keys, results = _load_checkpoint(checkpoint_path)
+    remaining = [(f, _file_key(f, input_dir)) for f in wav_files
+                 if _file_key(f, input_dir) not in done_keys]
+
+    total = len(wav_files)
+    n_done = total - len(remaining)
     print(f"\n  Pass 2/3: Whisper language detection (model={model_size}, en_threshold={en_threshold})")
+    print(f"  ({n_done}/{total} already done)")
+    if not remaining:
+        return pd.DataFrame(results)
+
     print(f"  Loading model...")
     model = whisper.load_model(model_size)
+    t0 = time.time()
 
-    results = []
-    for i, wav_path in enumerate(wav_files):
+    for i, (wav_path, fkey) in enumerate(remaining):
         audio = whisper.load_audio(wav_path)
         audio = whisper.pad_or_trim(audio)
         mel = whisper.log_mel_spectrogram(audio).to(model.device)
@@ -172,45 +228,70 @@ def run_whisper_pass(wav_files, model_size="base", en_threshold=0.3):
         en_prob = probs.get("en", 0)
 
         results.append({
-            "file": os.path.basename(wav_path),
+            "file": fkey,
             "whisper_lang": top_lang,
             "whisper_lang_prob": round(probs[top_lang], 3),
             "whisper_en_prob": round(en_prob, 3),
             "is_english": bool(en_prob > en_threshold),
         })
 
-        if (i + 1) % 20 == 0 or i == len(wav_files) - 1:
-            print(f"    {i+1}/{len(wav_files)}")
+        count = n_done + i + 1
+        if (i + 1) % CHECKPOINT_INTERVAL == 0:
+            _save_checkpoint(results, checkpoint_path)
+        if (i + 1) % 20 == 0 or i == len(remaining) - 1:
+            eta = _eta_str(time.time() - t0, i + 1, len(remaining))
+            print(f"    {count}/{total}  ({eta})")
 
+    _save_checkpoint(results, checkpoint_path)
     return pd.DataFrame(results)
 
 
 # ─── Pass 3: Speaker embeddings + clustering ─────────────────────────
 
-def run_embedding_pass(wav_files, n_clusters=None, max_clusters=30):
+def run_embedding_pass(wav_files, input_dir, output_dir, n_clusters=None, max_clusters=30):
     from speechbrain.inference.speaker import EncoderClassifier
     from sklearn.cluster import AgglomerativeClustering
     from sklearn.metrics import silhouette_score
 
-    print(f"\n  Pass 3/3: Speaker embeddings (ECAPA-TDNN)")
-    print(f"  Loading model...")
-    classifier = EncoderClassifier.from_hparams(
-        source="speechbrain/spkrec-ecapa-voxceleb",
-        run_opts={"device": "cpu"}
-    )
+    emb_path = os.path.join(output_dir, "embeddings.npy")
+    names_path = os.path.join(output_dir, "embedding_files.txt")
 
-    embeddings = []
-    filenames = []
-    for i, wav_path in enumerate(wav_files):
-        waveform = load_audio(wav_path).unsqueeze(0)  # [1, time]
-        emb = classifier.encode_batch(waveform)
-        embeddings.append(emb.squeeze().detach().numpy())
-        filenames.append(os.path.basename(wav_path))
+    if os.path.exists(emb_path) and os.path.exists(names_path):
+        print(f"\n  Pass 3/3: Speaker embeddings — loading from checkpoint")
+        X = np.load(emb_path)
+        with open(names_path) as f:
+            filenames = [line.strip() for line in f]
+    else:
+        print(f"\n  Pass 3/3: Speaker embeddings (ECAPA-TDNN)")
+        print(f"  Loading model...")
+        classifier = EncoderClassifier.from_hparams(
+            source="speechbrain/spkrec-ecapa-voxceleb",
+            run_opts={"device": "cpu"}
+        )
 
-        if (i + 1) % 20 == 0 or i == len(wav_files) - 1:
-            print(f"    {i+1}/{len(wav_files)}")
+        embeddings = []
+        filenames = []
+        t0 = time.time()
+        total = len(wav_files)
+        for i, wav_path in enumerate(wav_files):
+            waveform = load_audio(wav_path).unsqueeze(0)
+            emb = classifier.encode_batch(waveform)
+            embeddings.append(emb.squeeze().detach().numpy())
+            filenames.append(_file_key(wav_path, input_dir))
 
-    X = np.stack(embeddings)
+            if (i + 1) % 20 == 0 or i == total - 1:
+                eta = _eta_str(time.time() - t0, i + 1, total)
+                print(f"    {i+1}/{total}  ({eta})")
+
+            if (i + 1) % CHECKPOINT_INTERVAL == 0:
+                np.save(emb_path, np.stack(embeddings))
+                with open(names_path, "w") as f:
+                    f.write("\n".join(filenames))
+
+        X = np.stack(embeddings)
+        np.save(emb_path, X)
+        with open(names_path, "w") as f:
+            f.write("\n".join(filenames))
 
     # Cluster
     print(f"  Clustering ({X.shape[0]} embeddings, dim={X.shape[1]})...")
@@ -247,39 +328,51 @@ def main():
         print(f"No audio files found in {args.input_dir}")
         sys.exit(1)
 
-    output_dir = args.output_dir or args.input_dir
+    output_dir = args.output_dir or (args.input_dir.rstrip("/") + "_output")
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"  Input: {args.input_dir} ({len(wav_files)} files)")
     print(f"  Output: {output_dir}/")
 
+    t_start = time.time()
+
     # Pass 1
-    df = run_ina_pass(wav_files)
+    ina_ckpt = os.path.join(output_dir, "_checkpoint_ina.csv")
+    df = run_ina_pass(wav_files, args.input_dir, ina_ckpt)
 
     # Pass 2
     if not args.skip_whisper:
-        df_w = run_whisper_pass(wav_files, args.whisper_model, args.en_threshold)
+        whisper_ckpt = os.path.join(output_dir, "_checkpoint_whisper.csv")
+        df_w = run_whisper_pass(wav_files, args.input_dir, whisper_ckpt,
+                                args.whisper_model, args.en_threshold)
         df = df.merge(df_w, on="file")
 
     # Pass 3
     if not args.skip_embeddings:
-        df_spk, embeddings = run_embedding_pass(wav_files, args.n_clusters, args.max_clusters)
+        df_spk, embeddings = run_embedding_pass(wav_files, args.input_dir, output_dir,
+                                                 args.n_clusters, args.max_clusters)
         df = df.merge(df_spk, on="file")
-        np.save(os.path.join(output_dir, "embeddings.npy"), embeddings)
 
-    # Save
+    # Save final output
     csv_path = os.path.join(output_dir, "metadata.csv")
     df.to_csv(csv_path, index=False)
+
+    elapsed = time.time() - t_start
 
     # Print summary
     n = len(df)
     total_dur = df["duration_sec"].sum()
     print(f"\n{'='*50}")
     print(f"  {n} clips, {total_dur/60:.1f} min total")
+    print(f"  completed in {elapsed/60:.0f}m ({elapsed/n:.1f}s per clip)")
     gc = df["gender"].value_counts()
     for g, c in gc.items():
         print(f"  {g}: {c} ({c/n*100:.0f}%)")
     print(f"  speech: {df['is_speech'].sum()}  music: {df['is_music'].sum()}")
+    if "whisper_lang" in df.columns:
+        top_langs = df["whisper_lang"].value_counts().head(5)
+        langs_str = ", ".join(f"{l}={c}" for l, c in top_langs.items())
+        print(f"  top languages: {langs_str}")
     if "is_english" in df.columns:
         print(f"  english: {df['is_english'].sum()}  non-english: {(~df['is_english']).sum()}")
     if "speaker_id" in df.columns:
@@ -288,6 +381,13 @@ def main():
     print(f"  snr range: {df['snr_db'].min():.0f}–{df['snr_db'].max():.0f} dB")
     print(f"  → {csv_path}")
     print(f"{'='*50}")
+
+    # Clean up checkpoint files on successful completion
+    for ckpt in [ina_ckpt,
+                 os.path.join(output_dir, "_checkpoint_whisper.csv"),
+                 os.path.join(output_dir, "embedding_files.txt")]:
+        if os.path.exists(ckpt):
+            os.remove(ckpt)
 
 
 if __name__ == "__main__":

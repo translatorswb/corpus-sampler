@@ -27,7 +27,7 @@ def parse_args():
         epilog="""examples:
   %(prog)s metadata.csv
   %(prog)s metadata.csv -n 5000 --min-female 0.4
-  %(prog)s metadata.csv -n 3000 --max-per-speaker 100 --exclude-music --exclude-english
+  %(prog)s metadata.csv -n 3000 --max-per-speaker 100 --exclude-langs en,bn
 """)
     p.add_argument("metadata", help="Path to metadata.csv from analyze.py")
     p.add_argument("-o", "--output", default=None,
@@ -46,10 +46,9 @@ def parse_args():
                    help="Exclude music-dominant clips (default: yes)")
     p.add_argument("--include-music", action="store_true",
                    help="Include music-dominant clips")
-    p.add_argument("--exclude-english", action="store_true", default=True,
-                   help="Exclude English clips (default: yes)")
-    p.add_argument("--include-english", action="store_true",
-                   help="Include English clips")
+    p.add_argument("--exclude-langs", type=str, default="en",
+                   help="Comma-separated language codes to exclude (default: en). "
+                        "Set to empty string to disable: --exclude-langs ''")
     p.add_argument("--exclude-nonspeech", action="store_true", default=True,
                    help="Exclude non-speech clips (default: yes)")
     p.add_argument("--include-nonspeech", action="store_true",
@@ -89,11 +88,12 @@ def main():
         mask &= df["is_speech"] == True
         print(f"  Excluded {(~df['is_speech'] & ~df.get('is_music', False)).sum()} non-speech clips")
 
-    # English
-    if not args.include_english and "is_english" in df.columns:
-        en_mask = df["is_english"] == True
-        mask &= ~en_mask
-        print(f"  Excluded {en_mask.sum()} English clips")
+    # Language exclusion
+    exclude_langs = [l.strip() for l in args.exclude_langs.split(",") if l.strip()]
+    if exclude_langs and "whisper_lang" in df.columns:
+        lang_mask = df["whisper_lang"].isin(exclude_langs)
+        mask &= ~lang_mask
+        print(f"  Excluded {lang_mask.sum()} clips by language ({', '.join(exclude_langs)})")
 
     # SNR
     if args.min_snr > 0 and "snr_db" in df.columns:
@@ -237,7 +237,7 @@ def _dataset_stats(df, label):
             lines.append(f"| {g} | {c} | {c/n*100:.0f}% |")
         lines.append("")
 
-    # Speech/music/english
+    # Speech/music classification
     if "is_speech" in df.columns:
         lines.append("**Content classification:**")
         lines.append("")
@@ -250,9 +250,6 @@ def _dataset_stats(df, label):
             lines.append(f"| Music/jingles | {music_n} | {music_n/n*100:.0f}% |")
         nonspeech = n - speech_n
         lines.append(f"| Non-speech total | {nonspeech} | {nonspeech/n*100:.0f}% |")
-        if "is_english" in df.columns:
-            en_n = int(df["is_english"].sum())
-            lines.append(f"| English | {en_n} | {en_n/n*100:.0f}% |")
         lines.append("")
 
     # Speakers
@@ -319,7 +316,7 @@ def _write_report(df_full, df_selected, args, report_path):
     if args.min_female > 0:
         lines.append(f"| Min female ratio | {args.min_female} |")
     lines.append(f"| Exclude music | {not args.include_music} |")
-    lines.append(f"| Exclude English | {not args.include_english} |")
+    lines.append(f"| Exclude languages | {args.exclude_langs or 'none'} |")
     lines.append(f"| Exclude non-speech | {not args.include_nonspeech} |")
     if args.min_snr > 0:
         lines.append(f"| Min SNR | {args.min_snr} dB |")
